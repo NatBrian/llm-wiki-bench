@@ -99,11 +99,16 @@ llm-vs-rag-bench/
 **Objective:** Build `src/rag/` based on the design doc in Phase 0.
 **Requirement:** Must handle the actual document size/format and use our custom LLM/Embedding endpoint.
 
-### Phase 5: Evaluation Module
+### Phase 5: Evaluation Module [COMPLETED]
 **Objective:** Build LLM-as-Judge and metrics calculator in `src/evaluation/`.
 **Requirement:** Judge prompt must score 1-5. Metrics must compute mean/median score, latency, token usage, retrieval count.
+**Deliverables:**
+- `src/evaluation/judge.py` — LLMJudge class with rigorous prompt, parses response reliably
+- `src/evaluation/metrics.py` — MetricsCalculator and ArchitectureMetrics dataclass
+- `src/evaluation/report.py` — ReportGenerator creates DataFrame, saves CSV, prints to console
+- `scripts/test_evaluation.py` — Test script with mock BenchmarkResults
 
-### Phase 6: Trajectory Export
+### Phase 6: Trajectory Export [CURRENT]
 **Objective:** Build JSONL exporter for SFT in `src/trajectory/`.
 **Requirement:** Format must strictly follow: `{"messages": [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}`
 
