@@ -104,6 +104,7 @@ class WikiGraphBuilder:
         self.graph_json = self.graph_dir / "graph.json"
         self.graph_html = self.graph_dir / "graph.html"
         self.cache_file = self.graph_dir / ".cache.json"
+        self.inferred_edges_file = self.graph_dir / ".inferred_edges.jsonl"
         self.log_file = self.wiki_dir / "log.md"
         
         # Initialize clients
@@ -136,6 +137,42 @@ class WikiGraphBuilder:
     def save_cache(self, cache: dict):
         """Save inference cache to disk."""
         self.cache_file.write_text(json.dumps(cache, indent=2))
+
+    def load_checkpoint(self) -> tuple[list[dict], set[str]]:
+        """Load previously inferred edges from JSONL checkpoint file.
+
+        Returns:
+            Tuple of (edges list, set of completed page IDs)
+        """
+        edges = []
+        completed = set()
+        if self.inferred_edges_file.exists():
+            for line in self.inferred_edges_file.read_text().strip().split("\n"):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                    completed.add(record["page_id"])
+                    edges.extend(record.get("edges", []))
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        return edges, completed
+
+    def append_checkpoint(self, page_id_str: str, edges: list[dict]) -> None:
+        """Append one page's inferred edges to the JSONL checkpoint.
+
+        Args:
+            page_id_str: Page ID that was processed
+            edges: List of inferred edges for this page
+        """
+        self.graph_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "page_id": page_id_str,
+            "edges": edges,
+            "ts": date.today().isoformat()
+        }
+        with open(self.inferred_edges_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
     
     def build_nodes(self, pages: list[Path]) -> list[dict]:
         """Build node list from wiki pages."""
@@ -183,20 +220,42 @@ class WikiGraphBuilder:
         self,
         pages: list[Path],
         existing_edges: list[dict],
-        cache: dict
+        cache: dict,
+        resume: bool = True
     ) -> list[dict]:
-        """Pass 2: Infer semantic relationships via LLM."""
-        new_edges = []
-        
+        """Pass 2: Infer semantic relationships via LLM with checkpoint/resume.
+
+        Args:
+            pages: List of wiki page paths
+            existing_edges: List of already-extracted edges
+            cache: Cache dictionary for SHA256 hashes
+            resume: Whether to resume from checkpoint (default True)
+
+        Returns:
+            List of inferred edges
+        """
+        # Load checkpoint if resuming
+        checkpoint_edges, completed_ids = ([], set())
+        if resume:
+            checkpoint_edges, completed_ids = self.load_checkpoint()
+            if completed_ids:
+                print(f"  checkpoint: {len(completed_ids)} pages already done, {len(checkpoint_edges)} edges loaded")
+
+        new_edges = list(checkpoint_edges)
+
         # Only process pages that changed since last run
         changed_pages = []
         for p in pages:
             content = read_file(p)
             h = sha256(content)
+            pid = self.page_id(p)
             entry = cache.get(str(p))
-            
-            if not isinstance(entry, dict) or entry.get("hash") != h:
+
+            if (not isinstance(entry, dict) or entry.get("hash") != h) and pid not in completed_ids:
                 changed_pages.append(p)
+            elif pid in completed_ids:
+                # Already in checkpoint, skip
+                continue
             else:
                 # Page unchanged: load its inferred edges from cache
                 src = self.page_id(p)
@@ -210,13 +269,16 @@ class WikiGraphBuilder:
                         "color": EDGE_COLORS.get(rel.get("type", "INFERRED"), EDGE_COLORS["INFERRED"]),
                         "confidence": float(rel.get("confidence", 0.7)),
                     })
-        
+
         if not changed_pages:
             print("  no changed pages — skipping semantic inference")
-            return []
-        
-        print(f"  inferring relationships for {len(changed_pages)} changed pages...")
-        
+            return new_edges
+
+        total_pages = len(changed_pages)
+        already_done = len(completed_ids)
+        grand_total = total_pages + already_done
+        print(f"  inferring relationships for {total_pages} remaining pages (of {grand_total} total)...")
+
         # Build a summary of existing nodes for context
         node_list = "\n".join(
             f"- {self.page_id(p)} ({extract_frontmatter_type(read_file(p))})"
@@ -226,11 +288,13 @@ class WikiGraphBuilder:
             f"- {e['from']} → {e['to']} (EXTRACTED)"
             for e in existing_edges[:30]
         )
-        
-        for p in changed_pages:
+
+        for i, p in enumerate(changed_pages, 1):
             content = read_file(p)[:2000]  # truncate for context efficiency
             src = self.page_id(p)
-            
+            global_idx = already_done + i
+            print(f"    [{global_idx}/{grand_total}] Inferring for '{src}'... ", end="", flush=True)
+
             prompt = f"""Analyze this wiki page and identify implicit semantic relationships to other pages in the wiki.
 
 Source page: {src}
@@ -243,68 +307,89 @@ All available pages:
 Already-extracted edges from this page:
 {existing_edge_summary}
 
-Return ONLY a JSON array of NEW relationships not already captured by explicit wikilinks:
-[
-  {{"to": "page-id", "relationship": "one-line description", "confidence": 0.0-1.0, "type": "INFERRED or AMBIGUOUS"}}
-]
+Return ONLY a JSON object containing an "edges" array of NEW relationships not already captured by explicit wikilinks. The response must be STRICTLY valid JSON formatted exactly like this:
+{{
+  "edges": [
+    {{"to": "page-id", "relationship": "one-line description", "confidence": 0.0-1.0, "type": "INFERRED or AMBIGUOUS"}}
+  ]
+}}
+
+CRITICAL INSTRUCTION:
+YOU MUST RETURN ONLY A RAW JSON STRING BEGINNING WITH {{ AND ENDING WITH }}.
+DO NOT OUTPUT BULLET POINTS. DO NOT OUTPUT MARKDOWN LISTS.
+ANY CONVERSATIONAL PREAMBLE WILL CAUSE A SYSTEM CRASH.
 
 Rules:
 - Only include pages from the available list above
 - Confidence >= 0.7 → INFERRED, < 0.7 → AMBIGUOUS
 - Do not repeat edges already in the extracted list
-- Return empty array [] if no new relationships found
+- Return {{"edges": []}} if no new relationships found
 """
-            # Log the cycle
-            self.trajectory_logger.log_cycle(thought=prompt, action="infer_edges")
-            
-            result: CallResult = self.client.call(
-                prompt=prompt,
-                max_tokens=1024,
-                model=self.client.default_model_fast
-            )
-            
-            # Update metrics
-            self.trajectory_logger.update_metrics(
-                prompt_tokens=result.usage.prompt_tokens,
-                completion_tokens=result.usage.completion_tokens,
-                latency_ms=result.latency_ms
-            )
-            
-            raw = result.content.strip()
-            raw = re.sub(r"^```(?:json)?\s*", "", raw)
-            raw = re.sub(r"\s*```$", "", raw)
-            
+            page_edges = []
             try:
+                # Log the cycle
+                self.trajectory_logger.log_cycle(thought=prompt, action="infer_edges")
+
+                result: CallResult = self.client.call(
+                    prompt=prompt,
+                    max_tokens=1024,
+                    model=self.client.default_model_fast
+                )
+
+                # Update metrics
+                self.trajectory_logger.update_metrics(
+                    prompt_tokens=result.usage.prompt_tokens,
+                    completion_tokens=result.usage.completion_tokens,
+                    latency_ms=result.latency_ms
+                )
+
+                raw = result.content.strip()
+                raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                raw = re.sub(r"\s*```$", "", raw)
+
+                # Robust JSON extraction
+                match = re.search(r"\{.*\}", raw, re.DOTALL)
+                if match:
+                    raw = match.group(0)
+
                 inferred = json.loads(raw)
-                valid_rels = []
-                for rel in inferred:
+                edges_list = inferred.get("edges", [])
+                for rel in edges_list:
                     if isinstance(rel, dict) and "to" in rel:
-                        new_edges.append({
+                        edge = {
                             "from": src,
                             "to": rel["to"],
                             "type": rel.get("type", "INFERRED"),
                             "title": rel.get("relationship", ""),
                             "label": "",
                             "color": EDGE_COLORS.get(rel.get("type", "INFERRED"), EDGE_COLORS["INFERRED"]),
-                            "confidence": float(rel.get("confidence", 0.7)),
-                        })
-                        valid_rels.append(rel)
-                
+                            "confidence": rel.get("confidence", 0.7),
+                        }
+                        page_edges.append(edge)
+                        new_edges.append(edge)
+                print(f"-> Found {len(page_edges)} edges.")
+
                 # Save properly to cache
                 cache[str(p)] = {
-                    "hash": sha256(content),
-                    "edges": valid_rels
+                    "hash": sha256(read_file(p)),
+                    "edges": edges_list
                 }
-                
+
                 # Log observation
                 self.trajectory_logger.log_cycle(
                     thought="",
                     action="edges_inferred",
-                    observation=f"Inferred {len(valid_rels)} edges for {src}"
+                    observation=f"Inferred {len(page_edges)} edges for {src}"
                 )
-            except (json.JSONDecodeError, TypeError, ValueError):
-                pass
-        
+            except json.JSONDecodeError as jde:
+                print(f"-> [WARN] Invalid JSON: {str(jde)[:60]}")
+            except Exception as e:
+                err_msg = str(e).replace('\n', ' ')[:80]
+                print(f"-> [ERROR] {err_msg}")
+
+            # Persist checkpoint immediately after each page
+            self.append_checkpoint(src, page_edges)
+
         return new_edges
     
     def detect_communities(self, nodes: list[dict], edges: list[dict]) -> dict[str, int]:
@@ -331,7 +416,25 @@ Rules:
             return node_to_community
         except Exception:
             return {}
-    
+
+    def deduplicate_edges(self, edges: list[dict]) -> list[dict]:
+        """Merge duplicate and bidirectional edges, keeping highest confidence.
+
+        Args:
+            edges: List of edge dictionaries
+
+        Returns:
+            Deduplicated list of edges
+        """
+        best = {}  # (min(a,b), max(a,b)) -> edge
+        for e in edges:
+            a, b = e["from"], e["to"]
+            key = (min(a, b), max(a, b))
+            existing = best.get(key)
+            if not existing or e.get("confidence", 0) > existing.get("confidence", 0):
+                best[key] = e
+        return list(best.values())
+
     def render_html(self, nodes: list[dict], edges: list[dict]) -> str:
         """Generate self-contained vis.js HTML visualization."""
         nodes_json = json.dumps(nodes, indent=2)
@@ -469,7 +572,13 @@ function searchNodes(q) {{
             edges.extend(inferred)
             print(f"  → {len(inferred)} inferred edges")
             self.save_cache(cache)
-        
+
+        # Deduplicate edges
+        before_dedup = len(edges)
+        edges = self.deduplicate_edges(edges)
+        if before_dedup != len(edges):
+            print(f"  dedup: {before_dedup} → {len(edges)} edges")
+
         # Community detection
         print("  Running Louvain community detection...")
         communities = self.detect_communities(nodes, edges)

@@ -46,6 +46,67 @@ def parse_json_from_response(text: str) -> dict:
     return json.loads(match.group())
 
 
+def extract_wikilinks(content: str) -> list[str]:
+    """Extract all [[WikiLink]] targets from page content."""
+    return re.findall(r'\[\[([^\]]+)\]\]', content)
+
+
+def all_wiki_pages(wiki_dir: Path) -> set[str]:
+    """Return set of all wiki page stems (case-insensitive)."""
+    pages = set()
+    for p in wiki_dir.rglob("*.md"):
+        if p.name not in ("index.md", "log.md", "lint-report.md"):
+            pages.add(p.stem.lower())
+    return pages
+
+
+def validate_ingest(
+    wiki_dir: Path,
+    index_file: Path,
+    changed_pages: list[str] | None = None
+) -> dict:
+    """Validate wiki integrity after an ingest.
+
+    Checks:
+      1. Broken wikilinks in changed pages (or all pages if none specified)
+      2. Pages not registered in index.md
+
+    Returns dict with 'broken_links' and 'unindexed' lists.
+    """
+    existing_pages = all_wiki_pages(wiki_dir)
+    index_content = read_file(index_file).lower()
+
+    # Determine which pages to scan for broken links
+    if changed_pages:
+        scan_paths = [wiki_dir / p for p in changed_pages if (wiki_dir / p).exists()]
+    else:
+        scan_paths = [p for p in wiki_dir.rglob("*.md")
+                      if p.name not in ("index.md", "log.md", "lint-report.md")]
+
+    # Check 1: Broken wikilinks
+    broken_links = []
+    for page_path in scan_paths:
+        content = read_file(page_path)
+        rel = str(page_path.relative_to(wiki_dir))
+        for link in extract_wikilinks(content):
+            # Normalize: strip paths, check stem only
+            link_stem = Path(link).stem.lower() if '/' in link else link.lower()
+            if link_stem not in existing_pages:
+                broken_links.append((rel, link))
+
+    # Check 2: Unindexed pages (only check changed pages)
+    unindexed = []
+    for p in (changed_pages or []):
+        page_path = wiki_dir / p
+        if page_path.exists():
+            # Check if the page filename appears in index.md
+            stem = page_path.stem.lower()
+            if stem not in index_content and p not in ("log.md", "overview.md"):
+                unindexed.append(p)
+
+    return {"broken_links": broken_links, "unindexed": unindexed}
+
+
 class WikiIngestor:
     """Ingests documents into the LLM Wiki.
     
@@ -244,7 +305,7 @@ Return ONLY a valid JSON object with these fields (no markdown fences, no prose 
 {{
   "title": "Human-readable title for this source",
   "slug": "kebab-case-slug-for-filename",
-  "source_page": "full markdown content for wiki/sources/<slug>.md — use the source page format from the schema",
+  "source_page": "full markdown content for wiki/sources/<slug>.md — use the source page format from the schema. CRITICAL: Aggressively convert key people, products, concepts and projects into [[Wikilinks]] inline in the text. Omitting [[ ]] for known terms is a failure.",
   "index_entry": "- [Title](sources/slug.md) — one-line summary",
   "overview_update": "full updated content for wiki/overview.md, or null if no update needed",
   "entity_pages": [
@@ -316,8 +377,45 @@ Return ONLY a valid JSON object with these fields (no markdown fences, no prose 
             print("\n  ⚠️  Contradictions detected:")
             for c in contradictions:
                 print(f"     - {c}")
-        
-        print(f"\nDone. Ingested: {data['title']}")
+
+        # --- Post-ingest validation ---
+        created_pages = [f"sources/{slug}.md"]
+        for page in data.get("entity_pages", []):
+            created_pages.append(page["path"])
+        for page in data.get("concept_pages", []):
+            created_pages.append(page["path"])
+        updated_pages = ["index.md", "log.md"]
+        if data.get("overview_update"):
+            updated_pages.append("overview.md")
+
+        validation = validate_ingest(self.wiki_dir, self.index_file, created_pages)
+
+        print(f"\n{'='*50}")
+        print(f"  ✅ Ingested: {data['title']}")
+        print(f"{'='*50}")
+        print(f"  Created : {len(created_pages)} pages")
+        for p in created_pages:
+            print(f"           + wiki/{p}")
+        print(f"  Updated : {len(updated_pages)} pages")
+        for p in updated_pages:
+            print(f"           ~ wiki/{p}")
+        if contradictions:
+            print(f"  Warnings: {len(contradictions)} contradiction(s)")
+        if validation["broken_links"]:
+            print(f"  ⚠️  Broken links: {len(validation['broken_links'])}")
+            for page, link in validation["broken_links"][:10]:
+                print(f"           wiki/{page} → [[{link}]]")
+            if len(validation["broken_links"]) > 10:
+                print(f"           ... and {len(validation['broken_links']) - 10} more")
+        if validation["unindexed"]:
+            print(f"  ⚠️  Not in index.md: {len(validation['unindexed'])}")
+            for p in validation["unindexed"][:10]:
+                print(f"           wiki/{p}")
+            if len(validation["unindexed"]) > 10:
+                print(f"           ... and {len(validation['unindexed']) - 10} more")
+        if not validation["broken_links"] and not validation["unindexed"]:
+            print("  ✓ Validation passed — no broken links, all pages indexed")
+        print()
         
         # End trajectory tracking
         messages, metrics = self.trajectory_logger.end_query()

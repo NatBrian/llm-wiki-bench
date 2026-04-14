@@ -24,7 +24,7 @@ from src.config import Config, get_config, ConfigError
 from src.llm_client import LLMClient
 from src.data.dataset_loader import load_documents_and_questions
 from src.data.models import Document, Question, BenchmarkResult, Trajectory
-from src.llm_wiki import WikiIngestor, WikiQuerier, TrajectoryLogger
+from src.llm_wiki import WikiIngestor, WikiQuerier, WikiGraphBuilder, TrajectoryLogger
 from src.rag import RAGPipeline, Chunker, FAISSVectorStore
 from src.evaluation import LLMJudge, MetricsCalculator, ReportGenerator
 from src.trajectory import TrajectoryExporter
@@ -171,7 +171,18 @@ def benchmark(
                 if verbose:
                     logger.exception("Detailed error:")
                 continue
-        
+
+        # Build knowledge graph from wiki (enables graph-based neighbor expansion)
+        logger.info("Building knowledge graph from wiki...")
+        try:
+            graph_builder = WikiGraphBuilder(client=llm_client)
+            graph_data = graph_builder.build_graph(infer=True)
+            logger.info(f"  Graph: {len(graph_data.get('nodes', []))} nodes, {len(graph_data.get('edges', []))} edges")
+        except Exception as e:
+            logger.warning(f"  Graph building failed (continuing without graph): {e}")
+            if verbose:
+                logger.exception("Detailed error:")
+
         logger.info("Ingesting documents into RAG pipeline...")
         total_chunks = rag_pipeline.ingest_documents(documents)
         logger.info(f"  Created {total_chunks} chunks from {len(documents)} documents")

@@ -31,24 +31,27 @@ def write_file(path: Path, content: str):
 def find_relevant_pages(
     question: str,
     index_content: str,
-    wiki_dir: Path
+    wiki_dir: Path,
+    graph_dir: Optional[Path] = None
 ) -> list[Path]:
     """Extract linked pages from index that seem relevant to the question.
-    
+
     Faithfully preserves the original keyword-based relevance matching:
     1. Pull all [[links]] and markdown links from index
     2. Match question keywords against page titles:
        - English: Check words > 3 chars
        - Exact substring match for short titles (CJK support)
        - CJK chunks: Contiguous non-ASCII characters
-    3. Always include overview.md
-    4. Cap at 12 pages
-    
+    3. Graph-based expansion: Find neighbors of matched pages via graph edges
+    4. Always include overview.md
+    5. Cap at 15 pages
+
     Args:
         question: The question text
         index_content: Content of wiki/index.md
         wiki_dir: Path to wiki directory
-        
+        graph_dir: Optional path to graph directory for neighbor expansion
+
     Returns:
         List of relevant page paths
     """
@@ -76,12 +79,38 @@ def find_relevant_pages(
             if p.exists() and p not in relevant:
                 relevant.append(p)
 
+    # Graph-based expansion: find neighbors of matched pages
+    if graph_dir is None:
+        graph_dir = wiki_dir.parent / "graph"
+
+    graph_json = graph_dir / "graph.json"
+    if graph_json.exists() and relevant:
+        try:
+            graph_data = json.loads(graph_json.read_text())
+            page_ids = {
+                p.relative_to(wiki_dir).as_posix().replace('.md', '')
+                for p in relevant
+            }
+            neighbors = set()
+            for edge in graph_data.get('edges', []):
+                if edge.get('confidence', 0) >= 0.7:
+                    if edge['from'] in page_ids:
+                        neighbors.add(edge['to'])
+                    elif edge['to'] in page_ids:
+                        neighbors.add(edge['from'])
+            for nid in neighbors:
+                np = wiki_dir / f"{nid}.md"
+                if np.exists() and np not in relevant:
+                    relevant.append(np)
+        except (json.JSONDecodeError, KeyError):
+            pass
+
     # Always include overview
     overview = wiki_dir / "overview.md"
     if overview.exists() and overview not in relevant:
         relevant.insert(0, overview)
-    
-    return relevant[:12]  # cap to avoid context overflow
+
+    return relevant[:15]  # cap to avoid context overflow
 
 
 class WikiQuerier:
@@ -110,20 +139,23 @@ class WikiQuerier:
         self,
         wiki_dir: Optional[Path] = None,
         schema_file: Optional[Path] = None,
+        graph_dir: Optional[Path] = None,
         client: Optional[LLMClient] = None,
         trajectory_logger: Optional[TrajectoryLogger] = None
     ):
         """Initialize the WikiQuerier.
-        
+
         Args:
             wiki_dir: Directory for wiki files. Defaults to project root / wiki
             schema_file: Path to CLAUDE.md schema file. If None, uses default
+            graph_dir: Directory for graph files. Defaults to project root / graph
             client: LLMClient instance. If None, creates new one
             trajectory_logger: Logger for tracking. If None, creates new one
         """
         # Set up paths
         self.repo_root = Path(__file__).parent.parent.parent
         self.wiki_dir = wiki_dir or self.repo_root / "wiki"
+        self.graph_dir = graph_dir or self.repo_root / "graph"
         self.index_file = self.wiki_dir / "index.md"
         self.log_file = self.wiki_dir / "log.md"
         self.syntheses_dir = self.wiki_dir / "syntheses"
@@ -255,8 +287,10 @@ class WikiQuerier:
         if not index_content:
             return "Wiki is empty. Ingest some sources first.", {"error": "wiki_empty"}
         
-        # Step 2: Find relevant pages via keyword matching
-        relevant_pages = find_relevant_pages(question_text, index_content, self.wiki_dir)
+        # Step 2: Find relevant pages via keyword matching + graph expansion
+        relevant_pages = find_relevant_pages(
+            question_text, index_content, self.wiki_dir, self.graph_dir
+        )
         
         # Fallback to LLM-based selection if no keyword match
         if not relevant_pages or len(relevant_pages) <= 1:

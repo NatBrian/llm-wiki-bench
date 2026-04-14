@@ -14,6 +14,7 @@ Components:
 - WikiQuerier: Query the wiki for answers (from tools/query.py)
 - WikiGraphBuilder: Build knowledge graph (from tools/build_graph.py)
 - WikiLinter: Lint the wiki for health issues (from tools/lint.py)
+- WikiHealer: Auto-generate missing entity pages (from tools/heal.py)
 - TrajectoryLogger: Track agent trajectories for SFT export
 """
 
@@ -21,6 +22,7 @@ from .ingest import WikiIngestor
 from .query import WikiQuerier
 from .graph import WikiGraphBuilder
 from .lint import WikiLinter
+from .heal import WikiHealer
 from .tracking import TrajectoryLogger
 
 __all__ = [
@@ -28,5 +30,6 @@ __all__ = [
     "WikiQuerier",
     "WikiGraphBuilder",
     "WikiLinter",
+    "WikiHealer",
     "TrajectoryLogger",
 ]
