@@ -28,15 +28,11 @@ build/
 target/
 
 # Coverage reports
-.coverage
 coverage/
 htmlcov/
+.coverage
 
 # Python cache
 .mypy_cache/
 .pytest_cache/
-
-# System files
-.DS_Store
-Thumbs.db
 ```
