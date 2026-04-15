@@ -26,4 +26,16 @@ env/
 build/
 dist/
 target/
+
+# LLM-Wiki generated content
+graph/
+results/
+trajectories/
+wiki/sources/
+wiki/index.md
+wiki/log.md
+wiki/overview.md
+wiki/concepts/
+wiki/entities/
+wiki/syntheses/
 ```

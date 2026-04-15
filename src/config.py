@@ -64,7 +64,7 @@ class Config:
     def _load_env(self) -> None:
         """Load environment variables from .env file."""
         env_path = self.PROJECT_ROOT / ".env"
-        load_dotenv(dotenv_path=env_path)
+        load_dotenv(dotenv_path=env_path, override=True)
     
     def _validate_and_set_config(self) -> None:
         """Validate required configuration and set attributes."""
@@ -87,7 +87,10 @@ class Config:
         
         # Optional: OPENAI_MODEL_FAST (defaults to same as OPENAI_MODEL)
         self.OPENAI_MODEL_FAST = os.getenv("OPENAI_MODEL_FAST") or self.OPENAI_MODEL
-        
+
+        # Optional: EMBEDDING_MODEL (defaults to text-embedding-3-small)
+        self.EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+
         # Optional: MAX_TOKENS override
         max_tokens_str = os.getenv("MAX_TOKENS")
         if max_tokens_str:
@@ -142,7 +145,3 @@ class Config:
 def get_config() -> Config:
     """Get the global Config instance."""
     return Config.get()
-
-
-# Convenience access to common config values at module level
-config = get_config()

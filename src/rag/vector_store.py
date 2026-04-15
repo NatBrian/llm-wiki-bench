@@ -134,10 +134,10 @@ class FAISSVectorStore(VectorStore):
     
     def _get_embedding(self, text: str) -> List[float]:
         """Get embedding for a single text.
-        
+
         Args:
             text: Text to embed
-            
+
         Returns:
             Embedding vector as list of floats
         """
@@ -146,22 +146,23 @@ class FAISSVectorStore(VectorStore):
             input=[text],
             api_base=self.api_base,
             api_key=self.api_key,
-            custom_llm_provider='openai'
+            custom_llm_provider='openai',
+            encoding_format="float"
         )
         return response.data[0]["embedding"]
     
     def _get_embeddings_batch(self, texts: List[str], batch_size: int = 32) -> List[List[float]]:
         """Get embeddings for multiple texts in batches.
-        
+
         Args:
             texts: List of texts to embed
             batch_size: Batch size for API calls
-            
+
         Returns:
             List of embedding vectors
         """
         all_embeddings = []
-        
+
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
             response = self._litellm.embedding(
@@ -169,11 +170,12 @@ class FAISSVectorStore(VectorStore):
                 input=batch,
                 api_base=self.api_base,
                 api_key=self.api_key,
-                custom_llm_provider='openai'
+                custom_llm_provider='openai',
+                encoding_format="float"
             )
             batch_embeddings = [item["embedding"] for item in response.data]
             all_embeddings.extend(batch_embeddings)
-        
+
         return all_embeddings
     
     def add_chunks(self, chunks: List[DocumentChunk], 

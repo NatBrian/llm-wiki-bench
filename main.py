@@ -37,17 +37,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def create_app() -> typer.Typer:
-    """Create the Typer CLI application."""
-    app = typer.Typer(
-        name="llm-vs-rag-bench",
-        help="Benchmark LLM-Wiki-Agent vs traditional RAG pipeline",
-        add_completion=False
-    )
-    return app
-
-
-app = create_app()
+app = typer.Typer(
+    name="llm-vs-rag-bench",
+    help="Benchmark LLM-Wiki-Agent vs traditional RAG pipeline",
+    add_completion=False
+)
 
 
 @app.command()
@@ -110,6 +104,9 @@ def benchmark(
         logger.debug("Verbose mode enabled")
     
     try:
+        # Reset config singleton to pick up .env changes
+        Config.reset()
+        
         # Initialize configuration
         logger.info("Loading configuration...")
         config = get_config()
@@ -150,7 +147,8 @@ def benchmark(
             llm_client=llm_client,
             k=5,  # Retrieve top 5 chunks
             api_base=config.OPENAI_BASE_URL,
-            api_key=config.OPENAI_API_KEY
+            api_key=config.OPENAI_API_KEY,
+            embedding_model=config.EMBEDDING_MODEL
         )
         
         # Step 3: Ingest documents into both pipelines

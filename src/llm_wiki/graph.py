@@ -590,12 +590,12 @@ function searchNodes(q) {{
         
         # Save graph.json
         graph_data = {"nodes": nodes, "edges": edges, "built": today}
-        self.graph_json.write_text(json.dumps(graph_data, indent=2))
+        self.graph_json.write_text(json.dumps(graph_data, indent=2), encoding="utf-8")
         print(f"  saved: graph/graph.json  ({len(nodes)} nodes, {len(edges)} edges)")
-        
+
         # Save graph.html
         html = self.render_html(nodes, edges)
-        self.graph_html.write_text(html)
+        self.graph_html.write_text(html, encoding="utf-8")
         print(f"  saved: graph/graph.html")
         
         # Append to log

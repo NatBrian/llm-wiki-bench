@@ -202,7 +202,7 @@ class WikiIngestor:
     
     def update_index(self, new_entry: str, section: str = "Sources") -> None:
         """Insert new entry under specified section in index.md.
-        
+
         Args:
             new_entry: Entry line to add
             section: Section name (default: "Sources")
@@ -217,13 +217,32 @@ class WikiIngestor:
                 "## Concepts\n\n"
                 "## Syntheses\n"
             )
-        
+
         section_header = f"## {section}"
-        if section_header in content:
+
+        # Extract existing entries in this section to check for duplicates
+        # Find the section and get its entries until the next ## header
+        sections = content.split("## ")
+        target_section = None
+        for i, sec in enumerate(sections):
+            if sec.startswith(section):
+                # Find next section boundary
+                section_lines = sec.split("\n", 1)
+                if len(section_lines) > 1:
+                    target_section = section_lines[1]
+                else:
+                    target_section = ""
+                break
+
+        # Check if entry already exists in this section (exact match)
+        if target_section and new_entry.strip() in target_section:
+            return  # Already exists, skip
+
+        if section_header + "\n" in content:
             content = content.replace(section_header + "\n", section_header + "\n" + new_entry + "\n")
         else:
             content += f"\n{section_header}\n{new_entry}\n"
-        
+
         write_file(self.index_file, content)
     
     def append_log(self, entry: str) -> None:
