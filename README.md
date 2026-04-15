@@ -1,0 +1,189 @@
+# llm-wiki-bench
+
+Benchmark an agentic retrieval architecture (LLM-Wiki-Agent) against a traditional RAG pipeline on the UniDoc-Bench multimodal document QA dataset.
+
+## What This Does
+
+Given N documents and M questions from UniDoc-Bench, this tool runs two pipelines in parallel and produces a comparative report:
+
+| Pipeline | Approach |
+|----------|----------|
+| **LLM-Wiki-Agent** | Ingests documents into a self-organizing markdown wiki. Answers queries by reading relevant wiki pages. Builds a knowledge graph with inferred edges. |
+| **RAG** | Chunks documents into page-level segments, embeds them via FAISS vector store, retrieves top-k by similarity search, synthesizes answers with an LLM. |
+
+Both pipelines are scored by an LLM-as-Judge (1–5 scale). The agent's full decision trajectory is exported as OpenAI-format JSONL for supervised fine-tuning.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│              main.py (CLI)                   │
+│  python main.py benchmark --n-docs 5 \       │
+│                     --m-questions 3          │
+└──────────┬──────────────────┬───────────────┘
+           │                  │
+    ┌──────▼──────┐    ┌─────▼────────────┐
+    │ LLM-Wiki    │    │ RAG Pipeline     │
+    │             │    │                  │
+    │ WikiIngestor│    │ Chunker          │
+    │ WikiQuerier │    │ FAISSVectorStore │
+    │ WikiGraph   │    │ RAGPipeline      │
+    └──────┬──────┘    └─────┬────────────┘
+           │                  │
+    ┌──────▼──────────────────▼──────────────┐
+    │         Evaluation                      │
+    │  LLMJudge → MetricsCalculator → Report  │
+    └──────────────────┬──────────────────────┘
+                       │
+            ┌──────────▼──────────┐
+            │  TrajectoryExporter │
+            │  (JSONL for SFT)    │
+            └─────────────────────┘
+```
+
+## Directory Structure
+
+```
+llm-wiki-bench/
+├── main.py                     # CLI entrypoint (typer)
+├── src/
+│   ├── config.py               # Environment configuration singleton
+│   ├── llm_client.py           # OpenAI-compatible LLM client (litellm)
+│   ├── data/
+│   │   ├── models.py           # Document, Question, BenchmarkResult dataclasses
+│   │   └── dataset_loader.py   # UniDoc-Bench loader (HuggingFace datasets)
+│   ├── llm_wiki/
+│   │   ├── ingest.py           # WikiIngestor — LLM-driven document ingestion
+│   │   ├── query.py            # WikiQuerier — relevance matching + synthesis
+│   │   ├── graph.py            # WikiGraphBuilder — wikilink extraction + inference
+│   │   ├── lint.py             # WikiLinter — orphan/broken-link/contradiction checks
+│   │   ├── heal.py             # WikiHealer — auto-generate missing entity pages
+│   │   └── tracking.py         # TrajectoryLogger — full agent trace capture
+│   ├── rag/
+│   │   ├── chunker.py          # Page-level chunking
+│   │   ├── vector_store.py     # FAISS vector store with litellm embeddings
+│   │   └── pipeline.py         # RAGPipeline — ingest, retrieve, generate
+│   ├── evaluation/
+│   │   ├── judge.py            # LLMJudge — 1–5 scoring against ground truth
+│   │   ├── metrics.py          # MetricsCalculator — mean/median/latency/tokens
+│   │   └── report.py           # ReportGenerator — CSV + console comparison
+│   ├── trajectory/
+│   │   └── exporter.py         # TrajectoryExporter — OpenAI JSONL format
+│   └── generation/             # (reserved)
+├── docs/
+│   ├── wiki_agent_analysis.md  # Original llm-wiki-agent architecture analysis
+│   ├── dataset_analysis.md     # UniDoc-Bench schema and modality analysis
+│   └── rag_design.md           # RAG pipeline design decisions
+├── scripts/                    # Standalone inspection/test scripts
+├── data/                       # (reserved for downloaded datasets)
+├── models/                     # (reserved for local models)
+├── tests/                      # (reserved for pytest)
+├── wiki/                       # Generated by LLM-Wiki-Agent (gitignored)
+├── graph/                      # Generated knowledge graph (gitignored)
+├── results/                    # Benchmark CSV reports (gitignored)
+└── trajectories/               # Agent trajectory JSONL files (gitignored)
+```
+
+## Prerequisites
+
+- Python 3.12+
+- An OpenAI-compatible API endpoint (tested with OpenRouter)
+
+## Setup
+
+```bash
+pip install -r requirements.txt
+```
+
+Create a `.env` file:
+
+```
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+OPENAI_API_KEY=your-key-here
+OPENAI_MODEL=openrouter/elephant-alpha
+EMBEDDING_MODEL=nvidia/llama-nemotron-embed-vl-1b-v2:free
+```
+
+`EMBEDDING_MODEL` can be any model supported by litellm's OpenAI-compatible embedding endpoint. Use `:free` suffixed models on OpenRouter to avoid embedding costs.
+
+## Usage
+
+### Run benchmark
+
+```bash
+python main.py benchmark --n-docs 5 --m-questions 3
+```
+
+Options:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--n-docs` | required | Number of unique documents to ingest |
+| `--m-questions` | required | Number of questions to benchmark |
+| `--domain` | healthcare | Dataset domain (healthcare, finance, legal, etc.) |
+| `--dry-run` | false | Load data only, skip pipeline execution |
+| `--verbose` | false | Enable DEBUG-level logging |
+
+### Inspect dataset
+
+```bash
+python main.py inspect-dataset --n-docs 5 --m-questions 3
+```
+
+Prints document and question summaries without running pipelines.
+
+### Test LLM connection
+
+```bash
+python main.py test-llm
+```
+
+Sends a test completion and embedding request to verify API connectivity.
+
+## Output
+
+After a benchmark run:
+
+- **`results/benchmark_report.csv`** — Per-question scores and aggregate metrics for both pipelines
+- **`trajectories/agent_trajectories.jsonl`** — Agent decision traces in OpenAI chat format (one per question)
+- **`wiki/`** — The LLM-generated wiki (sources, entities, concepts, syntheses)
+- **`graph/`** — Knowledge graph (`graph.json` + interactive `graph.html`)
+
+## How It Works
+
+### LLM-Wiki-Agent Pipeline
+
+1. **Ingest** — For each document, the LLM reads the source and produces a structured JSON response containing a summary page, entity pages, concept pages, contradiction flags, and index/log entries. All output is written as markdown files under `wiki/`.
+
+2. **Graph** — After ingestion, a knowledge graph is built in two passes:
+   - Pass 1 (deterministic): Extract all `[[wikilinks]]` → `EXTRACTED` edges
+   - Pass 2 (LLM): Infer implicit relationships → `INFERRED` / `AMBIGUOUS` edges with confidence scores
+   - Louvain community detection is applied for visualization
+
+3. **Query** — When a question arrives, the agent selects relevant pages from `wiki/index.md` via keyword matching (with LLM fallback), reads those pages, and synthesizes an answer with inline `[[wikilink]]` citations.
+
+### RAG Pipeline
+
+1. **Chunk** — Each document is split into page-level chunks (one PNG page = one chunk), since UniDoc-Bench documents are multimodal page images.
+
+2. **Embed** — Chunks are embedded via litellm using an OpenAI-compatible embedding endpoint and stored in a FAISS index (L2 distance).
+
+3. **Retrieve + Generate** — For each question, the top-k chunks are retrieved by FAISS similarity search and passed to the LLM for answer synthesis.
+
+### Evaluation
+
+- **LLM-as-Judge** scores each predicted answer 1–5 against the ground truth, using a structured prompt that checks factual correctness, completeness, and relevance.
+- **Metrics** computed: mean/median score, latency, token usage, retrieval count, score distribution.
+- **Report** is printed to console and saved as CSV.
+
+## Design Decisions
+
+- **Page-level chunking**: UniDoc-Bench documents are PNG page images. Each page is a natural chunk boundary that preserves tables and figures.
+- **FAISS vector store**: Local, fast, no external service dependency. Uses L2 distance metric.
+- **litellm for all LLM calls**: Single abstraction layer supporting any OpenAI-compatible endpoint. No hardcoded provider.
+- **Config singleton with env override**: `Config.reset()` + `load_dotenv(override=True)` ensures `.env` changes are always picked up, even after module reload.
+- **No vector database for the wiki**: The wiki uses keyword matching + LLM page selection instead of embeddings. The knowledge graph supplements with inferred edges.
+
+## License
+
+MIT
